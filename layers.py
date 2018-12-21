@@ -3,7 +3,7 @@ from __future__ import print_function
 
 import tensorflow as tf
 
-from inits import zeros
+from inits import zeros, glorot
 
 flags = tf.app.flags
 FLAGS = flags.FLAGS
@@ -122,7 +122,7 @@ class MeanConvolve(Layer):
                  placeholders=None,
                  name = 'con',
                  sparse_support=True,
-                 sparse_inputs=False, act=tf.nn.relu, bias=False,
+                 sparse_inputs=False, act=tf.nn.relu, bias=True,
                  dropout=0, featureless=False, **kwargs):
         super(MeanConvolve, self).__init__(**kwargs)
 
@@ -137,10 +137,10 @@ class MeanConvolve(Layer):
         self.bias = bias
 
         with tf.variable_scope(self.name + '_vars'):
-            self.vars['weights'] = tf.get_variable('weights', shape=(input_dim, output_dim),
-                                         dtype=tf.float32, 
-                                         initializer=tf.contrib.layers.xavier_initializer(),
-                                         regularizer=tf.contrib.layers.l2_regularizer(FLAGS.weight_decay))
+            self.vars['neigh_weights'] = glorot([input_dim, output_dim],
+                                                        name='neigh_weights')
+            self.vars['self_weights'] = glorot([input_dim, output_dim],
+                                                        name='self_weights')
             if self.bias:
                 self.vars['bias'] = zeros([output_dim], name='bias')
 
@@ -151,11 +151,86 @@ class MeanConvolve(Layer):
 
         neigh_vecs = tf.nn.dropout(neigh_vec, 1-self.dropout)
         self_vecs = tf.nn.dropout(self_vec, 1-self.dropout)
-        means = tf.reduce_mean(tf.concat([neigh_vecs, 
-            tf.expand_dims(self_vecs, axis=1)], axis=1), axis=1)
+        neigh_means = tf.reduce_mean(neigh_vecs, axis=1)
        
         # [nodes] x [out_dim]
-        output = tf.matmul(means, self.vars['weights'])
+        from_neighs = tf.matmul(neigh_means, self.vars['neigh_weights'])
+
+        from_self = tf.matmul(self_vecs, self.vars["self_weights"])
+       
+        # [nodes] x [out_dim]
+        output = tf.add_n([from_self, from_neighs])
+
+        # bias
+        if self.bias:
+            output += self.vars['bias']
+       
+        return self.act(output)
+
+class MaxConvolve(Layer):
+    """Graph convolution layer."""
+    def __init__(self, input_dim, output_dim, 
+                 support, #prob, self_features,
+                 placeholders=None,
+                 name = 'con',
+                 sparse_support=True,
+                 sparse_inputs=False, act=tf.nn.relu, bias=False,
+                 dropout=0, featureless=False, **kwargs):
+        super(MaxConvolve, self).__init__(**kwargs)
+
+        self.dropout = dropout
+
+        self.name = name
+        self.act = act
+        self.support = support
+        self.sparse_support = sparse_support
+        self.sparse_inputs = sparse_inputs
+        self.featureless = featureless
+        self.bias = bias
+        self.hidden_dim = 64
+        self.mlp_layers = []
+
+        self.mlp_layers.append(Dense(input_dim=input_dim,
+                                 output_dim=self.hidden_dim,
+                                 act=tf.nn.relu,
+                                 dropout=dropout,
+                                 sparse_inputs=False,
+                                 logging=self.logging))
+
+        with tf.variable_scope(self.name + '_vars'):
+            self.vars['neigh_weights'] = glorot([self.hidden_dim, output_dim],
+                                                        name='neigh_weights')
+            self.vars['self_weights'] = glorot([input_dim, output_dim],
+                                                        name='self_weights')
+            if self.bias:
+                self.vars['bias'] = zeros([output_dim], name='bias')
+
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        if self.logging:
+            self._log_vars()
+
+    def call(self, self_vec, neigh_vec):
+
+        neigh_vecs = tf.nn.dropout(neigh_vec, 1-self.dropout)
+        self_vecs = tf.nn.dropout(self_vec, 1-self.dropout)
+        neigh_h = neigh_vecs
+
+        dims = tf.shape(neigh_h)
+        batch_size = dims[0]
+        num_neighbors = dims[1]
+        # [nodes * sampled neighbors] x [hidden_dim]
+        h_reshaped = tf.reshape(neigh_h, (batch_size * num_neighbors, self.input_dim))
+
+        for l in self.mlp_layers:
+            h_reshaped = l(h_reshaped)
+        neigh_h = tf.reshape(h_reshaped, (batch_size, num_neighbors, self.hidden_dim))
+        neigh_h = tf.reduce_max(neigh_h, axis=1)
+        
+        from_neighs = tf.matmul(neigh_h, self.vars['neigh_weights'])
+        from_self = tf.matmul(self_vecs, self.vars["self_weights"])
+        
+        output = tf.add_n([from_self, from_neighs])
 
         # bias
         if self.bias:

@@ -21,10 +21,18 @@ class Sampler(object):
             self.w_s = tf.get_variable('sample_weights', [self.input_dim, 2])
         '''
         self.adj = adj
+        self.adj_trans = adj.transpose()
+        self.item_samples = None
+        self.item_sampled_vals = None
+        self.user_samples = None
+        self.user_sampled_vals = None
 
         #self.num_data = tf.shape(self.adj)[0]
 
     def sampling(self, v, type):
+        pass
+    
+    def gen_sample_list(self):
         pass
 
 '''
@@ -84,17 +92,39 @@ class SamplerAdapt(Sampler):
 class SimpleSampler(Sampler):
 
     def sampling(self, v, type):
+        if type == 'item':
+            return self.item_samples[v], self.item_sampled_vals[v]
+        elif type == 'user':
+            return self.user_samples[v], self.user_sampled_vals[v]
+    
+    def gen_sample_list(self):
         samples = []
         sampled_vals = []
-        for node in v:
-            neib_x = self.adj[node]
-            if neib_x.nnz >= self.layer_sizes:
-                sample = np.random.choice(neib_x.indices, self.layer_sizes, replace=False)
+        for node in range(self.adj.shape[0]):
+            neib = self.adj[node]
+            if neib.nnz >= self.layer_sizes:
+                sample = np.random.choice(neib.indices, self.layer_sizes, replace=False)
                 
             else:
-                sample = np.random.choice(neib_x.indices, self.layer_sizes, replace=True)
-            val = neib_x[0, sample].toarray()
+                sample = np.random.choice(neib.indices, self.layer_sizes, replace=True)
+            val = neib[0, sample].toarray()
             samples.append(sample)
             sampled_vals.append(val)
+        self.item_samples = np.array(samples,dtype=int)
+        self.item_sampled_vals = np.squeeze(np.array(sampled_vals))-1
+
+        samples = []
+        sampled_vals = []
+        for node in range(self.adj_trans.shape[0]):
+            neib = self.adj_trans[node]
+            if neib.nnz >= self.layer_sizes:
+                sample = np.random.choice(neib.indices, self.layer_sizes, replace=False)
+                
+            elif neib.nnz > 0:
+                sample = np.random.choice(neib.indices, self.layer_sizes, replace=True)
+            val = neib[0, sample].toarray()
+            samples.append(sample)
+            sampled_vals.append(val)
+        self.user_samples = np.array(samples,dtype=int)
+        self.user_sampled_vals = np.squeeze(np.array(sampled_vals))-1
         
-        return np.array(samples,dtype=int), np.squeeze(np.array(sampled_vals))-1

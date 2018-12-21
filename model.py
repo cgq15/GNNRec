@@ -186,6 +186,7 @@ class GNN(GeneralizedModel):
         self.u_indices = placeholders['user_indices']
         self.v_indices = placeholders['item_indices']
         self.v_supports = placeholders["item_support"]
+        self.u_supports = placeholders["user_support"]
         self.labels = placeholders['labels']
         self.dropout = placeholders['dropout']
         self.class_values = class_values
@@ -214,44 +215,64 @@ class GNN(GeneralizedModel):
         
         self.item_input = tf.nn.embedding_lookup(self.v_features, self.v_indices)
         self.user_input = tf.nn.embedding_lookup(self.u_features, self.u_indices)
-        self.support_input = tf.nn.embedding_lookup(self.v_features, self.v_supports)
+        self.u_support_input = tf.nn.embedding_lookup(self.u_features, self.u_supports)
+        self.v_support_input = tf.nn.embedding_lookup(self.v_features, self.v_supports)
         self.Wv = tf.get_variable("Wv", shape=(self.v_dim, dims[1]), dtype=tf.float32, 
                                          initializer=tf.contrib.layers.xavier_initializer())
         self.Wu = tf.get_variable("Wu", shape=(self.u_dim, dims[1]), dtype=tf.float32, 
                                          initializer=tf.contrib.layers.xavier_initializer())
         self.Wout = tf.get_variable("Wout", shape=(dims[1]+dims[1], dims[-1]), dtype=tf.float32, 
                                          initializer=tf.contrib.layers.xavier_initializer())                                 
-        self.aggregator = layers.MeanConvolve(input_dim=dims[1],
+        self.v_aggregator = layers.MeanConvolve(input_dim=dims[1],
                                  output_dim=dims[1],
                                  act=tf.nn.relu,
                                  dropout=placeholders['dropout'],
+                                 name='vcon',
                                  support=self.v_supports,
                                  sparse_inputs=False,
                                  logging=self.logging)
+        self.u_aggregator = layers.MeanConvolve(input_dim=dims[1],
+                                 output_dim=dims[1],
+                                 act=tf.nn.relu,
+                                 dropout=placeholders['dropout'],
+                                 name='ucon',
+                                 support=self.u_supports,
+                                 sparse_inputs=False,
+                                 logging=self.logging)                         
         
-        self.optimizer = tf.train.AdamOptimizer(learning_rate=FLAGS.learning_rate,beta1=0.9, beta2=0.999, epsilon=1.e-8)
+        self.optimizer = tf.train.AdamOptimizer(learning_rate=FLAGS.learning_rate)
 
         self.user_vecs = None
         self.item_vecs = None
-        self.support_val = placeholders['support_val']
-        self.edge_weights = tf.get_variable("edge_weight", shape=(FLAGS.classnum, dims[1]), dtype=tf.float32, 
+        self.item_support_val = placeholders['item_support_val']
+        self.user_support_val = placeholders['user_support_val']
+        self.i_edge_weights = tf.get_variable("i_edge_weight", shape=(FLAGS.classnum, dims[1]), dtype=tf.float32, 
                                          initializer=tf.contrib.layers.xavier_initializer())
+        self.u_edge_weights = tf.get_variable("u_edge_weight", shape=(FLAGS.classnum, dims[1]), dtype=tf.float32, 
+                                         initializer=tf.contrib.layers.xavier_initializer())                                 
 
         self.build()
     
 
     def _build(self):
-        item_input = tf.nn.relu(tf.matmul(self.item_input, self.Wv))
-        self.item_vecs = tf.nn.l2_normalize(tf.nn.dropout(item_input, 1-self.dropout),1)
+        user_vec = tf.nn.l2_normalize(tf.nn.relu(tf.matmul(self.user_input, self.Wu)),1)
+        item_vec = tf.nn.l2_normalize(tf.nn.relu(tf.matmul(self.item_input, self.Wv)),1)
 
-        v_support_input = tf.nn.relu(tf.tensordot(self.support_input, self.Wv, axes=1))
-        support_vecs = tf.nn.dropout(v_support_input, 1-self.dropout)
-        support_weights = tf.gather(self.edge_weights, self.support_val)
-        support_vecs = support_vecs * support_weights
+        v_support_input = tf.nn.relu(tf.tensordot(self.v_support_input, self.Wv, axes=1))
+        u_support_input = tf.nn.relu(tf.tensordot(self.u_support_input, self.Wu, axes=1))
 
-        user_vec = tf.nn.relu(tf.matmul(self.user_input, self.Wu))
-        self.user_vecs = tf.nn.l2_normalize(self.aggregator.call(user_vec, support_vecs),1)         
-        self.outputs = tf.matmul(tf.concat([self.user_vecs, self.item_vecs], -1), self.Wout)
+        v_support_vecs = tf.nn.l2_normalize(v_support_input,1)
+        v_support_weights = tf.gather(self.i_edge_weights, self.item_support_val)
+        v_support_vecs = v_support_vecs * v_support_weights
+
+        u_support_vecs = tf.nn.l2_normalize(u_support_input,1)
+        u_support_weights = tf.gather(self.u_edge_weights, self.user_support_val)
+        u_support_vecs = u_support_vecs * u_support_weights
+
+        user_vec = tf.nn.l2_normalize(self.v_aggregator.call(user_vec, v_support_vecs),1)  
+        item_vec = tf.nn.l2_normalize(self.u_aggregator.call(item_vec, u_support_vecs),1)
+
+        self.outputs = tf.matmul(tf.concat([user_vec, item_vec], -1), self.Wout)
         
     def _loss(self):
         # Weight decay loss
